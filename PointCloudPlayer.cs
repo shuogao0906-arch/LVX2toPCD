@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.ComponentModel;
 using System.Drawing;
 using System.Drawing.Drawing2D;
 using System.Globalization;
@@ -135,6 +136,7 @@ namespace LivoxPointCloudPlayer
         }
 
         public override int Count { get { return frames.Count; } }
+        public string FilePath { get { return path; } }
         public override string DisplayName { get { return Path.GetFileName(path); } }
         public override string BaseName { get { return Path.GetFileNameWithoutExtension(path); } }
         public override int SuggestedInterval { get { return interval; } }
@@ -998,6 +1000,7 @@ namespace LivoxPointCloudPlayer
         private readonly Button pauseButton;
         private readonly Button nextButton;
         private readonly Button saveButton;
+        private readonly Button convertButton;
         private ViewerMode viewerMode = ViewerMode.Start;
         private FrameSource source;
         private int frameIndex = -1;
@@ -1038,6 +1041,7 @@ namespace LivoxPointCloudPlayer
             pauseButton = MakeButton("暂停", 68);
             nextButton = MakeButton("下一帧", 78);
             saveButton = MakeButton("保存当前帧 PCD", 132);
+            convertButton = MakeButton("转换为 PCD", 108);
 
             openLvxButton.Click += delegate { OpenLvx2(); };
             openPcdButton.Click += delegate { OpenPcd(); };
@@ -1049,6 +1053,7 @@ namespace LivoxPointCloudPlayer
             pauseButton.Click += delegate { if (viewerMode == ViewerMode.Live) PauseLivePlayback(); else StopPlayback(); };
             nextButton.Click += delegate { LoadFrame(frameIndex + 1, false); };
             saveButton.Click += delegate { SaveCurrentFrame(); };
+            convertButton.Click += delegate { ConvertLvx2ToPcd(); };
 
             colorLabel = MakeLabel("Color", 42);
             colorMode.DropDownStyle = ComboBoxStyle.DropDownList;
@@ -1088,7 +1093,7 @@ namespace LivoxPointCloudPlayer
             toolbar.Controls.AddRange(new Control[]
             {
                 openLvxButton, openPcdButton, openFolderButton, connectLidarButton, backButton,
-                previousButton, playButton, pauseButton, nextButton, saveButton,
+                previousButton, playButton, pauseButton, nextButton, saveButton, convertButton,
                 colorLabel, colorMode, intervalLabel, interval, intervalValue
             });
 
@@ -1489,6 +1494,7 @@ namespace LivoxPointCloudPlayer
             playButton.Visible = lvx2 || live;
             pauseButton.Visible = lvx2 || live;
             saveButton.Visible = lvx2 || live;
+            convertButton.Visible = lvx2;
             previousButton.Visible = folder;
             nextButton.Visible = folder;
             colorLabel.Visible = loaded;
@@ -1503,6 +1509,169 @@ namespace LivoxPointCloudPlayer
             playButton.Enabled = (live ? liveReceiver != null : ready) && (lvx2 || live) && !timer.Enabled;
             pauseButton.Enabled = (live ? liveReceiver != null : ready) && (lvx2 || live) && timer.Enabled;
             saveButton.Enabled = ready && (lvx2 || live) && currentFrame != null;
+            convertButton.Enabled = ready && lvx2;
+        }
+
+        private sealed class ConversionProgress
+        {
+            public int Frame;
+            public int Total;
+            public long NativeIndex;
+            public int PointCount;
+        }
+
+        private void ConvertLvx2ToPcd()
+        {
+            Lvx2Source lvx2 = source as Lvx2Source;
+            if (viewerMode != ViewerMode.Lvx2 || lvx2 == null) return;
+
+            StopPlayback();
+            string outputDirectory = Path.Combine(
+                Path.GetDirectoryName(lvx2.FilePath),
+                Path.GetFileNameWithoutExtension(lvx2.FilePath) + "_pcd_frames");
+
+            if (Directory.Exists(outputDirectory) && Directory.EnumerateFiles(outputDirectory, "*.pcd", SearchOption.TopDirectoryOnly).Any())
+            {
+                DialogResult overwrite = MessageBox.Show(
+                    this,
+                    "输出文件夹中已经存在 PCD 文件。\n\n继续后，同名帧文件会被覆盖，其他文件会保留。\n\n" + outputDirectory,
+                    "继续转换 LVX2？",
+                    MessageBoxButtons.YesNo,
+                    MessageBoxIcon.Question);
+                if (overwrite != DialogResult.Yes) return;
+            }
+
+            Form progressDialog = new Form();
+            progressDialog.Text = "LVX2 转换为 PCD";
+            progressDialog.StartPosition = FormStartPosition.CenterParent;
+            progressDialog.FormBorderStyle = FormBorderStyle.FixedDialog;
+            progressDialog.ClientSize = new Size(560, 132);
+            progressDialog.MaximizeBox = false;
+            progressDialog.MinimizeBox = false;
+            progressDialog.ShowInTaskbar = false;
+            progressDialog.BackColor = Color.FromArgb(31, 34, 39);
+            progressDialog.ForeColor = Color.White;
+
+            Label progressLabel = new Label();
+            progressLabel.SetBounds(18, 15, 524, 22);
+            progressLabel.Text = "正在准备转换…";
+            progressLabel.AutoEllipsis = true;
+
+            ProgressBar progressBar = new ProgressBar();
+            progressBar.SetBounds(18, 43, 524, 24);
+            progressBar.Minimum = 0;
+            progressBar.Maximum = Math.Max(1, lvx2.Count);
+
+            Label outputLabel = new Label();
+            outputLabel.SetBounds(18, 78, 430, 35);
+            outputLabel.Text = outputDirectory;
+            outputLabel.AutoEllipsis = true;
+
+            Button cancelButton = MakeButton("取消", 78);
+            cancelButton.SetBounds(464, 79, 78, 30);
+
+            progressDialog.Controls.Add(progressLabel);
+            progressDialog.Controls.Add(progressBar);
+            progressDialog.Controls.Add(outputLabel);
+            progressDialog.Controls.Add(cancelButton);
+
+            BackgroundWorker worker = new BackgroundWorker();
+            worker.WorkerReportsProgress = true;
+            worker.WorkerSupportsCancellation = true;
+            bool workerFinished = false;
+            bool conversionCancelled = false;
+            Exception conversionError = null;
+            int writtenFrames = 0;
+            string inputPath = lvx2.FilePath;
+
+            cancelButton.Click += delegate
+            {
+                if (!worker.IsBusy) return;
+                worker.CancelAsync();
+                cancelButton.Enabled = false;
+                progressLabel.Text = "正在取消，请等待当前帧写入完成…";
+            };
+            progressDialog.FormClosing += delegate(object sender, FormClosingEventArgs e)
+            {
+                if (!workerFinished && worker.IsBusy && e.CloseReason == CloseReason.UserClosing)
+                {
+                    e.Cancel = true;
+                    worker.CancelAsync();
+                    cancelButton.Enabled = false;
+                    progressLabel.Text = "正在取消，请等待当前帧写入完成…";
+                }
+            };
+            worker.DoWork += delegate(object sender, DoWorkEventArgs e)
+            {
+                Directory.CreateDirectory(outputDirectory);
+                using (Lvx2Source conversionSource = new Lvx2Source(inputPath))
+                {
+                    for (int i = 0; i < conversionSource.Count; i++)
+                    {
+                        if (worker.CancellationPending)
+                        {
+                            e.Cancel = true;
+                            return;
+                        }
+                        PointCloudFrame frame = conversionSource.LoadFrame(i);
+                        long nativeIndex = conversionSource.NativeIndex(i);
+                        string fileName = nativeIndex.ToString("D6", CultureInfo.InvariantCulture) + ".pcd";
+                        WritePcd(Path.Combine(outputDirectory, fileName), frame);
+                        writtenFrames = i + 1;
+                        worker.ReportProgress(0, new ConversionProgress
+                        {
+                            Frame = i + 1,
+                            Total = conversionSource.Count,
+                            NativeIndex = nativeIndex,
+                            PointCount = frame.Count
+                        });
+                    }
+                }
+            };
+            worker.ProgressChanged += delegate(object sender, ProgressChangedEventArgs e)
+            {
+                ConversionProgress progress = (ConversionProgress)e.UserState;
+                progressBar.Maximum = Math.Max(1, progress.Total);
+                progressBar.Value = Math.Min(progressBar.Maximum, progress.Frame);
+                progressLabel.Text = string.Format(
+                    CultureInfo.InvariantCulture,
+                    "正在转换 {0}/{1}  ·  frame {2}  ·  {3:N0} points",
+                    progress.Frame, progress.Total, progress.NativeIndex, progress.PointCount);
+                status.Text = progressLabel.Text;
+            };
+            worker.RunWorkerCompleted += delegate(object sender, RunWorkerCompletedEventArgs e)
+            {
+                conversionCancelled = e.Cancelled;
+                conversionError = e.Error;
+                workerFinished = true;
+                progressDialog.Close();
+            };
+
+            worker.RunWorkerAsync();
+            progressDialog.ShowDialog(this);
+            progressDialog.Dispose();
+            worker.Dispose();
+
+            if (conversionError != null)
+            {
+                status.Text = "LVX2 转换失败";
+                MessageBox.Show(this, conversionError.Message, "LVX2 转换失败", MessageBoxButtons.OK, MessageBoxIcon.Error);
+            }
+            else if (conversionCancelled)
+            {
+                status.Text = "已取消转换  ·  已写入 " + writtenFrames.ToString(CultureInfo.InvariantCulture) + " 帧  ·  " + outputDirectory;
+            }
+            else
+            {
+                status.Text = "转换完成  ·  " + writtenFrames.ToString(CultureInfo.InvariantCulture) + " 帧  ·  " + outputDirectory;
+                MessageBox.Show(
+                    this,
+                    "转换完成。\n\n每一帧已保存为一个 PCD 文件，共 " + writtenFrames.ToString(CultureInfo.InvariantCulture) + " 帧。\n\n" + outputDirectory,
+                    "LVX2 转换完成",
+                    MessageBoxButtons.OK,
+                    MessageBoxIcon.Information);
+            }
+            UpdateButtons();
         }
 
         private void SaveCurrentFrame()

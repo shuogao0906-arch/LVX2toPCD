@@ -5,6 +5,7 @@ Windows 原生 Livox 点云播放器与 LVX2/PCD 工具。无需浏览器、Pyth
 ## 功能
 
 - 播放 `.lvx2` 文件，固定 2 帧累积。
+- 将整个 `.lvx2` 文件逐帧转换为 PCD，每一帧生成一个文件。
 - 查看单个 PCD 或连续 PCD 帧文件夹。
 - 保存 LVX2 当前原始帧为二进制 PCD。
 - 发现并连接 Livox MID-360、HAP、HAP Industrial，实时显示点云。
@@ -13,6 +14,8 @@ Windows 原生 Livox 点云播放器与 LVX2/PCD 工具。无需浏览器、Pyth
 - Reflectivity、Distance、Solid Color、Elevation、LiDAR ID 着色。
 - 原生 OpenGL 三维画布：Z 轴朝上、透视相机、网格、轨道旋转、平移和缩放。
 - 自动在程序目录下创建 `save` 文件夹保存当前帧。
+
+打开 LVX2 后点击“转换为 PCD”，程序会在 LVX2 文件旁创建 `<文件名>_pcd_frames` 文件夹。转换结果采用六位帧号命名（例如 `000000.pcd`），保留 `x y z intensity tag lidar_id` 字段；进度窗口可随时取消转换。
 
 ## 下载运行
 
