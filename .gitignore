@@ -1,0 +1,8 @@
+save/
+*.pcd
+*.lvx2
+*.user
+*.suo
+.vs/
+bin/
+obj/
